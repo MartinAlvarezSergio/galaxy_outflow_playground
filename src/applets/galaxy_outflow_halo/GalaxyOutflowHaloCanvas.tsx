@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { setLogicalTransform } from "../../core/canvasScale";
 import { AppletHostAdapter } from "../../core/host";
-import { ControlCard } from "../../ui/ControlCard";
+import { AppletStage } from "../../ui/stage/AppletStage";
+import { useCanvasBackingStore } from "../../ui/stage/hooks";
+import {
+  StageIconButton,
+  StagePillButton,
+  StagePills,
+  StageReadout,
+  StageSection,
+  StageSelect,
+  StageSlider,
+  StageToggle
+} from "../../ui/stage/StageControls";
 import { GasProfile, OutflowMode } from "./types";
 import {
   MW_C_NFW,
@@ -17,6 +29,7 @@ import { gasDensityAtCenter } from "./gasProfile";
 import { renderGasDensityPlot } from "./gasDensityPlot";
 import {
   renderTurnaroundPdfPlot,
+  TURNAROUND_CAPTION_BAND,
   type TurnaroundPdfData
 } from "./turnaroundPdfPlot";
 import {
@@ -26,8 +39,9 @@ import {
   nfwRho0FromMVir,
   nfwScaleRadius
 } from "./halo";
-import { createGalaxyOutflowSim, STREAM_MAX_PARTICLES } from "./sim";
+import { createGalaxyOutflowSim, GRAV_PLUMMER_EPS_KPC, STREAM_MAX_PARTICLES } from "./sim";
 import { renderGalaxyOutflow } from "./render";
+import "./galaxyOutflowHalo.css";
 
 type GalaxyOutflowHaloCanvasProps = {
   host?: AppletHostAdapter;
@@ -77,10 +91,59 @@ const G1_MAX = 2.5;
 const G2_MIN = 0.5;
 const G2_MAX = 4;
 
-const PLOT_W = 900;
-const PLOT_H = 240;
-const PLOT_TURN_H = 220;
+/** Logical size of the main canvas; matches the simulation's pixel mapping in sim.ts. */
+const CANVAS_W = 900;
+const CANVAS_H = 620;
+/** Logical size of the two inset plots (drawn 1:1 at the default inset width). */
+const PLOT_W = 300;
+const PLOT_H = 160;
+/** Saved PDF images: same layout as the inset plus a caption strip, at 2× for sharp text. */
+const EXPORT_SCALE = 2;
 const MAX_STORED_PDF_SNAPSHOTS = 8;
+/** Text readouts refresh at this interval; the canvases redraw every frame. */
+const READOUT_INTERVAL_MS = 100;
+
+const TIP = {
+  play: "Start, pause or resume the clock. Settings and bursts still apply while paused.",
+  clear: "Remove all tracers, stop the stream and empty the apocenter histogram. Settings stay as they are.",
+  fire: "Launch a burst of tracer pairs (set by Burst pairs). Each pair leaves one point within the disk spread, one tracer up (+y) and one down (−y).",
+  stream: `Emit tracer pairs continuously until stopped or ${STREAM_MAX_PARTICLES} tracers. Starting a stream clears the live apocenter histogram; stopping it saves the histogram below.`,
+  trails: "Draw each tracer's recent path.",
+  vectors: "Draw each tracer's velocity as a green line; longer = faster.",
+  mDm: "Dark-matter mass inside the virial radius; with r_vir and c it sets the NFW density ρ₀.",
+  rVir: "Virial radius of the halo. The dashed rings mark 0.2, 0.5 and 1 r_vir.",
+  concentration: "NFW scale radius rₛ = r_vir / c. Higher c packs more of the halo mass towards the centre.",
+  mGal: `Mass of the Miyamoto–Nagai disk standing in for the galaxy's baryons (fixed a = ${MIYAMOTO_NAGAI_A_KPC} kpc, b = ${MIYAMOTO_NAGAI_B_KPC} kpc).`,
+  timeRate: "Simulated time per second of wall-clock time.",
+  launchSpeed: "Launch speed of every tracer (all get the same |v|).",
+  escape: `Sets launch |v| to v_esc on the disk midplane (y = 0) at in-plane radius r = max(0.2 kpc, disk spread), using the current NFW halo plus Miyamoto–Nagai disk (a = ${MIYAMOTO_NAGAI_A_KPC} kpc, b = ${MIYAMOTO_NAGAI_B_KPC} kpc).`,
+  opening:
+    "Full opening angle of the launch cone around the disk normal (±y), in the plane of the picture. Each tracer's direction is random within it; 0 = straight up and down.",
+  tracerMass:
+    "Mass of each tracer cloud. It only matters for drag: a heavier cloud has less area per mass (A/m ∝ m^(−1/3)), so it is slowed less. Dots grow with mass.",
+  burstPairs: "Up/down tracer pairs launched by each Fire burst.",
+  spread: "Half-width of the strip along the disk from which tracers are launched.",
+  model: "Ballistic: gravity only.\nDrag: gravity plus ram-pressure deceleration by the halo gas.",
+  drag:
+    "a_drag = λ · Cd · ρ(r) · v² · (A/m). Tracer is a constant-density spherical cloud (A ∝ m^(2/3)); reference = 10⁵ M☉ @ 100 pc, Cd = 0.5. λ = 0 disables drag without changing the mode.",
+  gasProfile: "Shape of the gas density ρ(r) that the drag uses.",
+  singleExponent:
+    "Single-power model uses ρ = ρ₀ (r_soft / r)ⁿ for r ≫ r_soft, i.e. ρ ∝ r⁻ⁿ; larger n means a steeper outward decline (the value is this n, not a “runaway” growth factor).",
+  softening: "Inner floor r_soft: ρ(r) uses max(r, r_soft), so the power law stays finite at the centre.",
+  rKnee: "Break radius of the double power law: ρ = ρ₀ x^(−γ₁) (1 + x)^(−(γ₂ − γ₁)), with x = r / r_break (r floored at r_soft).",
+  gamma1: "Inner slope: ρ ∝ r^(−γ₁) well inside the break.",
+  gamma2: "Outer slope: ρ ∝ r^(−γ₂) well outside the break.",
+  activeTracers: "Tracers currently in flight.",
+  maxSpeed: "Speed of the fastest tracer right now.",
+  streamEjected: `Tracers launched by the current stream (cap ${STREAM_MAX_PARTICLES}).`,
+  rs: "Derived NFW scale radius rₛ = r_vir / c.",
+  rho0: "Derived NFW density ρ₀, set so the dark mass inside r_vir equals M_DM(r_vir).",
+  gasPlot:
+    "Gas density model: log10(ρ [g cm⁻³]) vs log10(r [kpc]). Dots are tracers at their radius and model ρ(r) (cyan launched up, orange down).",
+  pdfPlot:
+    "PDF of first apocenter radius (v_r: + to -). Top bar: escaped through r_max with no turnaround.\nStopping the stream (or hitting the eject cap) saves a PNG of this plot below; a new stream starts a fresh histogram.",
+  snapshot: `Stored stream PDF snapshot (newest last, max ${MAX_STORED_PDF_SNAPSHOTS}).`
+} as const;
 
 type StoredPdfSnapshot = {
   id: string;
@@ -116,7 +179,7 @@ function downloadJson(obj: unknown, filename: string): void {
 }
 
 function sanitizeFilenamePart(s: string): string {
-  return s.replace(/[^\w.\-]+/g, "_").slice(0, 48);
+  return s.replace(/[^\w.-]+/g, "_").slice(0, 48);
 }
 
 function formatMsun(m: number): string {
@@ -129,6 +192,21 @@ function formatRhoGcc(log10rho: number): string {
 
 function formatHaloRho0(rho: number): string {
   return `${rho.toExponential(2)} M☉ kpc^-3`;
+}
+
+/** Render the apocenter PDF with a caption on an offscreen canvas, independent of the inset's size. */
+function exportTurnaroundPdfPng(data: TurnaroundPdfData, caption: string): string {
+  const h = PLOT_H + TURNAROUND_CAPTION_BAND;
+  const canvas = document.createElement("canvas");
+  canvas.width = PLOT_W * EXPORT_SCALE;
+  canvas.height = h * EXPORT_SCALE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return "";
+  }
+  setLogicalTransform(ctx, PLOT_W);
+  renderTurnaroundPdfPlot(ctx, PLOT_W, h, data, { caption });
+  return canvas.toDataURL("image/png");
 }
 
 export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps): JSX.Element {
@@ -172,8 +250,6 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
   const [showVectors, setShowVectors] = useState(false);
   const [maxSpeedKms, setMaxSpeedKms] = useState(0);
   const [activeCount, setActiveCount] = useState(0);
-  const [derivedRho0, setDerivedRho0] = useState(0);
-  const [derivedRs, setDerivedRs] = useState(0);
   const [streamEjected, setStreamEjected] = useState(0);
   const [streamActive, setStreamActive] = useState(false);
   const [storedPdfSnapshots, setStoredPdfSnapshots] = useState<StoredPdfSnapshot[]>([]);
@@ -206,6 +282,10 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
   );
   const gasRhoCenterGcc = gasRhoCenterMsunPerKpc3 * MSUN_PER_KPC3_TO_G_PER_CM3;
 
+  /* Same derived halo quantities the simulation uses (sim.ts haloDerived). */
+  const derivedRs = nfwScaleRadius(rVirKpc, concentration);
+  const derivedRho0 = nfwRho0FromMVir(mDmVirMsun, rVirKpc, concentration);
+
   const sim = useMemo(
     () =>
       createGalaxyOutflowSim({
@@ -232,6 +312,9 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
       }),
     []
   );
+
+  // The plots are redrawn every frame, so a resize needs no extra repaint.
+  useCanvasBackingStore([plotCanvasRef, turnaroundPlotCanvasRef]);
 
   useEffect(() => {
     sim.setMDmVirMsun(mDmVirMsun);
@@ -302,16 +385,13 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
   }, [reducedMotion]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
-    const ctx = canvas.getContext("2d");
+    const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) {
       return;
     }
 
     let last = performance.now();
+    let lastReadout = -Infinity;
     let raf = 0;
     const tick = (time: number): void => {
       const dt = (time - last) / 1000;
@@ -320,71 +400,57 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
         sim.step(dt);
       }
       const snapshot = sim.getSnapshot();
+      setLogicalTransform(ctx, CANVAS_W);
       renderGalaxyOutflow(ctx, snapshot, { showTrails, showVectors });
 
-      const plotCanvas = plotCanvasRef.current;
-      const plotCtx = plotCanvas?.getContext("2d");
-      if (plotCanvas && plotCtx) {
-        const g = plotGasRef.current;
+      const plotCtx = plotCanvasRef.current?.getContext("2d");
+      if (plotCtx) {
         const particles = snapshot.particles.map((p) => ({
           rKpc: Math.hypot(p.positionKpc.x, p.positionKpc.y),
           upward: p.upward
         }));
-        renderGasDensityPlot(plotCtx, plotCanvas.width, plotCanvas.height, g, particles);
+        setLogicalTransform(plotCtx, PLOT_W);
+        renderGasDensityPlot(plotCtx, PLOT_W, PLOT_H, plotGasRef.current, particles);
       }
 
-      const turnCanvas = turnaroundPlotCanvasRef.current;
-      const turnCtx = turnCanvas?.getContext("2d");
-      if (turnCanvas && turnCtx) {
-        const pdfRaw = snapshot.turnaroundPdf;
-        const pdfData: TurnaroundPdfData = {
-          binCounts: pdfRaw.binCounts.slice(),
-          logRMin: pdfRaw.logRMin,
-          logRMax: pdfRaw.logRMax,
-          escapeCount: pdfRaw.escapeCount,
-          nBins: pdfRaw.nBins
-        };
-        const streamJustEnded = prevStreamActiveRef.current && !snapshot.streamActive;
-        prevStreamActiveRef.current = snapshot.streamActive;
+      const pdfRaw = snapshot.turnaroundPdf;
+      const pdfData: TurnaroundPdfData = {
+        binCounts: pdfRaw.binCounts.slice(),
+        logRMin: pdfRaw.logRMin,
+        logRMax: pdfRaw.logRMax,
+        escapeCount: pdfRaw.escapeCount,
+        nBins: pdfRaw.nBins
+      };
+      const turnCtx = turnaroundPlotCanvasRef.current?.getContext("2d");
+      if (turnCtx) {
+        setLogicalTransform(turnCtx, PLOT_W);
+        renderTurnaroundPdfPlot(turnCtx, PLOT_W, PLOT_H, pdfData);
+      }
 
-        renderTurnaroundPdfPlot(turnCtx, turnCanvas.width, turnCanvas.height, pdfData);
-
-        if (streamJustEnded) {
-          const total =
-            pdfData.binCounts.reduce((a, b) => a + b, 0) + pdfData.escapeCount;
-          if (total > 0) {
-            const modeBit =
-              mode === "drag"
-                ? `drag λ=${dragStrength.toFixed(1)}`
-                : "ballistic";
-            const caption = `${modeBit} · ${snapshot.streamEjected} tracers · ${new Date().toLocaleString()}`;
-            renderTurnaroundPdfPlot(turnCtx, turnCanvas.width, turnCanvas.height, pdfData, {
-              caption
-            });
-            const dataUrl = turnCanvas.toDataURL("image/png");
-            renderTurnaroundPdfPlot(turnCtx, turnCanvas.width, turnCanvas.height, pdfData);
-            const label = `${modeBit} · ${snapshot.streamEjected} tr · ${new Date().toLocaleTimeString()}`;
-            setStoredPdfSnapshots((prev) => {
-              const next: StoredPdfSnapshot[] = [
-                ...prev,
-                {
-                  id: newPdfSnapshotId(),
-                  dataUrl,
-                  label,
-                  pdfData
-                }
-              ];
-              return next.slice(-MAX_STORED_PDF_SNAPSHOTS);
-            });
+      // Stopping the stream (or reaching its cap) saves this run's PDF for comparison.
+      const streamJustEnded = prevStreamActiveRef.current && !snapshot.streamActive;
+      prevStreamActiveRef.current = snapshot.streamActive;
+      if (streamJustEnded) {
+        const total = pdfData.binCounts.reduce((a, b) => a + b, 0) + pdfData.escapeCount;
+        if (total > 0) {
+          const modeBit = mode === "drag" ? `drag λ=${dragStrength.toFixed(1)}` : "ballistic";
+          const caption = `${modeBit} · ${snapshot.streamEjected} tracers · ${new Date().toLocaleString()}`;
+          const dataUrl = exportTurnaroundPdfPng(pdfData, caption);
+          const label = `${modeBit} · ${snapshot.streamEjected} tr · ${new Date().toLocaleTimeString()}`;
+          if (dataUrl) {
+            setStoredPdfSnapshots((prev) =>
+              [...prev, { id: newPdfSnapshotId(), dataUrl, label, pdfData }].slice(-MAX_STORED_PDF_SNAPSHOTS)
+            );
           }
         }
       }
 
-      setMaxSpeedKms(snapshot.maxSpeedKms);
-      setActiveCount(snapshot.activeCount);
-      setDerivedRho0(snapshot.derived.nfwRho0MsunPerKpc3);
-      setDerivedRs(snapshot.derived.rsKpc);
-      setStreamEjected(snapshot.streamEjected);
+      if (streamJustEnded || time - lastReadout > READOUT_INTERVAL_MS) {
+        lastReadout = time;
+        setMaxSpeedKms(snapshot.maxSpeedKms);
+        setActiveCount(snapshot.activeCount);
+        setStreamEjected(snapshot.streamEjected);
+      }
       setStreamActive(snapshot.streamActive);
       raf = requestAnimationFrame(tick);
     };
@@ -392,6 +458,15 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [paused, running, showTrails, showVectors, sim, mode, dragStrength]);
+
+  function onPlayPause(): void {
+    if (!running) {
+      setRunning(true);
+      setPaused(false);
+    } else {
+      setPaused((v) => !v);
+    }
+  }
 
   function onReset(): void {
     sim.reset();
@@ -449,518 +524,411 @@ export function GalaxyOutflowHaloCanvas({ host }: GalaxyOutflowHaloCanvasProps):
     rMaxKpc: Math.max(120, fieldHalfWidthKpc * 2.5)
   };
 
-  return (
-    <div className="gravity-layout">
-      <ControlCard
-        title="Galaxy outflow vs. halo (MW-like)"
-        subtitle="Same launch |v|; direction is random within the opening-angle cone around +/-y (disk normal). NFW halo + Miyamoto–Nagai disk (fixed a, b) accelerate tracers (no tracer gravity). Drag mode adds gas deceleration."
-      >
-        <div className="control-grid">
-          <div className="button-row control-span-2">
-            <button type="button" onClick={() => setRunning(true)}>
-              Start
-            </button>
-            <button type="button" onClick={() => setPaused((v) => !v)} disabled={!running}>
-              {paused ? "Resume" : "Pause"}
-            </button>
-            <button type="button" onClick={onReset}>
-              Clear
-            </button>
-            <button type="button" onClick={onFire}>
-              Fire burst
-            </button>
-            <button type="button" onClick={onToggleStream}>
-              {streamActive ? "Stop stream" : "Start stream"}
-            </button>
-          </div>
+  const moving = running && !paused;
+  const playLabel = moving ? "Pause" : running ? "Resume" : "Start";
+  const dragOff = mode !== "drag";
+  const streamStatus = streamActive ? "(on)" : streamEjected >= STREAM_MAX_PARTICLES ? "(cap reached)" : "";
 
-          <div className="stats control-span-2">
-            <div>
-              Active tracers: <strong>{activeCount}</strong>
-            </div>
-            <div>
-              Max |v|: <strong>{maxSpeedKms.toFixed(0)} km/s</strong>
-            </div>
-            <div>
-              Stream ejected:{" "}
-              <strong>
-                {streamEjected} / {STREAM_MAX_PARTICLES}
-              </strong>
-              {streamActive ? " (on)" : streamEjected >= STREAM_MAX_PARTICLES ? " (cap reached)" : ""}
-            </div>
-          </div>
+  const toolbar = (
+    <>
+      <StageIconButton icon={moving ? "pause" : "play"} label={playLabel} tip={TIP.play} onClick={onPlayPause} />
+      <StageIconButton icon="trash" label="Clear" tip={TIP.clear} onClick={onReset} />
+      <StagePillButton label="Fire burst" tip={TIP.fire} onClick={onFire} />
+      <StageToggle
+        label={streamActive ? "Stop stream" : "Start stream"}
+        on={streamActive}
+        tip={TIP.stream}
+        onChange={onToggleStream}
+      />
+    </>
+  );
 
-          <details className="control-section control-span-2" open>
-            <summary>Halo + galaxy mass</summary>
-            <div className="control-grid" style={{ marginTop: "0.65rem" }}>
-              <label className="control-span-2">
-                <span className="slider-label">
-                  <span>M_DM(r_vir) total dark halo (log scale)</span>
-                  <strong>{formatMsun(mDmVirMsun)}</strong>
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.002}
-                  value={Number.isFinite(mDmSlider) ? mDmSlider : 0.5}
-                  onChange={(e) => {
-                    const t = Number(e.target.value);
-                    setMDmVirMsun(10 ** (LOG_M_DM_MIN + t * (LOG_M_DM_MAX - LOG_M_DM_MIN)));
-                  }}
-                />
-              </label>
+  const controls = (
+    <>
+      <StagePills>
+        <StageToggle label="Trails" on={showTrails} tip={TIP.trails} onChange={setShowTrails} />
+        <StageToggle label="Velocity vectors" on={showVectors} tip={TIP.vectors} onChange={setShowVectors} />
+      </StagePills>
 
-              <label>
-                <span className="slider-label">
-                  <span>r_vir</span>
-                  <strong>{Math.round(rVirKpc)} kpc</strong>
-                </span>
-                <input
-                  type="range"
-                  min={R_VIR_MIN}
-                  max={R_VIR_MAX}
-                  value={rVirKpc}
-                  onChange={(e) => setRVirKpc(Number(e.target.value))}
-                />
-              </label>
+      <StageSection title="Halo + galaxy mass">
+        <StageSlider
+          label="M_DM(r_vir) total dark halo (log scale)"
+          display={formatMsun(mDmVirMsun)}
+          value={Number.isFinite(mDmSlider) ? mDmSlider : 0.5}
+          min={0}
+          max={1}
+          step={0.002}
+          tip={TIP.mDm}
+          onChange={(t) => setMDmVirMsun(10 ** (LOG_M_DM_MIN + t * (LOG_M_DM_MAX - LOG_M_DM_MIN)))}
+        />
+        <StageSlider
+          label="r_vir"
+          display={`${Math.round(rVirKpc)} kpc`}
+          value={rVirKpc}
+          min={R_VIR_MIN}
+          max={R_VIR_MAX}
+          step={1}
+          tip={TIP.rVir}
+          onChange={setRVirKpc}
+        />
+        <StageSlider
+          label="NFW concentration c = r_vir/rₛ"
+          display={concentration.toFixed(1)}
+          value={concentration}
+          min={C_MIN}
+          max={C_MAX}
+          step={0.5}
+          tip={TIP.concentration}
+          onChange={setConcentration}
+        />
+        <StageSlider
+          label="M_baryons (MN disk mass, log scale)"
+          display={formatMsun(mGalaxyMsun)}
+          value={Number.isFinite(mGalSlider) ? mGalSlider : 0.5}
+          min={0}
+          max={1}
+          step={0.005}
+          tip={TIP.mGal}
+          onChange={(t) => setMGalaxyMsun(10 ** (LOG_M_GAL_MIN + t * (LOG_M_GAL_MAX - LOG_M_GAL_MIN)))}
+        />
+      </StageSection>
 
-              <label>
-                <span className="slider-label">
-                  <span>NFW concentration c = r_vir/rₛ</span>
-                  <strong>{concentration.toFixed(1)}</strong>
-                </span>
-                <input
-                  type="range"
-                  min={C_MIN}
-                  max={C_MAX}
-                  step={0.5}
-                  value={concentration}
-                  onChange={(e) => setConcentration(Number(e.target.value))}
-                />
-              </label>
+      <StageSection title="Outflow properties">
+        <StageSlider
+          label="Field half-width (center → edge)"
+          display={`${fieldHalfWidthKpc.toFixed(0)} kpc`}
+          value={fieldHalfWidthKpc}
+          min={FIELD_MIN}
+          max={FIELD_MAX}
+          step={1}
+          tip={`Distance from the centre to the left/right edge of the view; 0.5 r_vir ≈ ${(0.5 * rVirKpc).toFixed(0)} kpc. Tracers beyond max(2.5 × this, 120 kpc) are removed and, without a turnaround, counted as escaped.`}
+          onChange={setFieldHalfWidthKpc}
+        />
+        <StageSlider
+          label="Time rate"
+          display={`${timeRateMyrPerSec.toFixed(0)} Myr / s`}
+          value={timeRateMyrPerSec}
+          min={TIME_RATE_MIN}
+          max={TIME_RATE_MAX}
+          step={1}
+          tip={TIP.timeRate}
+          onChange={setTimeRateMyrPerSec}
+        />
+        <StageSlider
+          label="Launch speed (|v|)"
+          display={`${Math.round(outflowSpeedKms)} km/s`}
+          value={outflowSpeedKms}
+          min={V_OUT_MIN}
+          max={V_OUT_MAX}
+          step={1}
+          tip={TIP.launchSpeed}
+          onChange={setOutflowSpeedKms}
+        />
+        <StagePills>
+          <StagePillButton label="Escape velocity" tip={TIP.escape} onClick={applyEscapeVelocity} />
+        </StagePills>
+        <StageSlider
+          label="Opening angle (full cone, in-plane around +/-disk normal)"
+          display={`${openingAngleDeg.toFixed(1)} deg`}
+          value={openingAngleDeg}
+          min={OPENING_MIN}
+          max={OPENING_MAX}
+          step={0.5}
+          tip={TIP.opening}
+          onChange={(v) => {
+            setOpeningAngleDeg(v);
+            sim.setOpeningAngleDeg(v);
+          }}
+        />
+        <StageSlider
+          label="Tracer mass (drag, log scale)"
+          display={formatMsun(particleMassMsun)}
+          value={Number.isFinite(mPartSlider) ? mPartSlider : 0.5}
+          min={0}
+          max={1}
+          step={0.004}
+          tip={TIP.tracerMass}
+          onChange={(t) => setParticleMassMsun(10 ** (M_PART_LOG_MIN + t * (M_PART_LOG_MAX - M_PART_LOG_MIN)))}
+        />
+        <StageSlider
+          label="Burst pairs"
+          display={String(burstPairs)}
+          value={burstPairs}
+          min={PAIRS_MIN}
+          max={PAIRS_MAX}
+          step={1}
+          tip={TIP.burstPairs}
+          onChange={setBurstPairs}
+        />
+        <StageSlider
+          label="Disk spread (half-width)"
+          display={`${launchSpreadKpc.toFixed(2)} kpc`}
+          value={launchSpreadKpc}
+          min={SPREAD_MIN}
+          max={SPREAD_MAX}
+          step={0.05}
+          tip={TIP.spread}
+          onChange={setLaunchSpreadKpc}
+        />
+        <StageSelect
+          label="Outflow model"
+          value={mode}
+          options={[
+            { value: "ballistic", label: "Ballistic (no drag)" },
+            { value: "drag", label: "Drag = λ · Cd · ρ · v² · A/m (ram pressure)" }
+          ]}
+          tip={TIP.model}
+          onChange={setMode}
+        />
+      </StageSection>
 
-              <label className="control-span-2">
-                <span className="slider-label">
-                  <span>M_baryons (MN disk mass, log scale)</span>
-                  <strong>{formatMsun(mGalaxyMsun)}</strong>
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.005}
-                  value={Number.isFinite(mGalSlider) ? mGalSlider : 0.5}
-                  onChange={(e) => {
-                    const t = Number(e.target.value);
-                    setMGalaxyMsun(10 ** (LOG_M_GAL_MIN + t * (LOG_M_GAL_MAX - LOG_M_GAL_MIN)));
-                  }}
-                />
-              </label>
-
-              <div className="stats control-span-2 subtle" style={{ fontSize: "0.82rem" }}>
-                Derived NFW: rₛ = <strong>{derivedRs.toFixed(1)} kpc</strong>, ρ₀ ={" "}
-                <strong>{formatHaloRho0(derivedRho0)}</strong>. Disk: Miyamoto–Nagai a = {MIYAMOTO_NAGAI_A_KPC}{" "}
-                kpc, b = {MIYAMOTO_NAGAI_B_KPC} kpc (vertical scale height).
-              </div>
-            </div>
-          </details>
-
-          <details className="control-section control-span-2" open>
-            <summary>Outflow properties</summary>
-            <div className="control-grid" style={{ marginTop: "0.65rem" }}>
-          <label>
-            <span className="slider-label">
-              <span>Field half-width (center → edge)</span>
-              <strong>
-                {fieldHalfWidthKpc.toFixed(0)} kpc
-                <span className="subtle" style={{ fontWeight: 400, fontSize: "0.85em" }}>
-                  {" "}
-                  · 0.5 r_vir ≈ {(0.5 * rVirKpc).toFixed(0)} kpc
-                </span>
-              </strong>
-            </span>
-            <input
-              type="range"
-              min={FIELD_MIN}
-              max={FIELD_MAX}
-              value={fieldHalfWidthKpc}
-              onChange={(e) => setFieldHalfWidthKpc(Number(e.target.value))}
+      {/* Opens when drag mode is chosen (its controls only act in drag mode); it can still be toggled by hand. */}
+      <StageSection title="Drag" defaultOpen={!dragOff}>
+        <StageSlider
+          label="Drag strength λ (ram-pressure multiplier)"
+          display={dragStrength.toFixed(2)}
+          value={dragStrength}
+          min={DRAG_MIN}
+          max={DRAG_MAX}
+          step={0.05}
+          disabled={dragOff}
+          tip={TIP.drag}
+          onChange={setDragStrength}
+        />
+        <StageSelect
+          label="Gas ρ(r) for drag"
+          value={gasProfile}
+          options={[
+            { value: "single_power", label: "Single power law" },
+            { value: "double_power", label: "Double power law" }
+          ]}
+          disabled={dragOff}
+          tip={TIP.gasProfile}
+          onChange={setGasProfile}
+        />
+        <StageSlider
+          label="Gas ρ₀ reference (log₁₀ g cm⁻³ at r = r_soft)"
+          display={formatRhoGcc(gasLogRhoGcc)}
+          value={gasLogRhoGcc}
+          min={GAS_LOG_GCC_MIN}
+          max={GAS_LOG_GCC_MAX}
+          step={0.05}
+          disabled={dragOff}
+          tip={`log₁₀ ρ₀ = ${gasLogRhoGcc.toFixed(2)} → ${formatRhoGcc(gasLogRhoGcc)} (${gasDensityScaleMsunPerKpc3.toExponential(2)} M☉ kpc⁻³).`}
+          onChange={setGasLogRhoGcc}
+        />
+        {gasProfile === "single_power" ? (
+          <>
+            <StageSlider
+              label="Radial slope n in ρ ∝ r⁻ⁿ (r ≫ r_soft)"
+              display={singleExponent.toFixed(2)}
+              value={singleExponent}
+              min={SINGLE_EXP_MIN}
+              max={SINGLE_EXP_MAX}
+              step={0.05}
+              disabled={dragOff}
+              tip={TIP.singleExponent}
+              onChange={setSingleExponent}
             />
-          </label>
-
-          <label>
-            <span className="slider-label">
-              <span>Time rate</span>
-              <strong>{timeRateMyrPerSec.toFixed(0)} Myr / s</strong>
-            </span>
-            <input
-              type="range"
-              min={TIME_RATE_MIN}
-              max={TIME_RATE_MAX}
-              value={timeRateMyrPerSec}
-              onChange={(e) => setTimeRateMyrPerSec(Number(e.target.value))}
+            <StageSlider
+              label="Softening rₛ"
+              display={`${gasSofteningKpc.toFixed(2)} kpc`}
+              value={gasSofteningKpc}
+              min={GAS_SOFT_MIN}
+              max={GAS_SOFT_MAX}
+              step={0.01}
+              disabled={dragOff}
+              tip={TIP.softening}
+              onChange={setGasSofteningKpc}
             />
-          </label>
-
-          <label className="control-span-2">
-            <span className="slider-label">
-              <span>Launch speed (|v|)</span>
-              <strong>{Math.round(outflowSpeedKms)} km/s</strong>
-            </span>
-            <input
-              type="range"
-              min={V_OUT_MIN}
-              max={V_OUT_MAX}
-              value={outflowSpeedKms}
-              onChange={(e) => setOutflowSpeedKms(Number(e.target.value))}
-            />
-          </label>
-
-          <div className="control-span-2">
-            <button type="button" onClick={applyEscapeVelocity}>
-              Escape velocity
-            </button>
-            <div className="subtle" style={{ fontSize: "0.78rem", marginTop: "0.35rem", lineHeight: 1.4 }}>
-              Sets launch |v| to v_esc on the disk midplane (y = 0) at in-plane radius r = max(0.2 kpc, disk
-              spread), using the current NFW halo plus Miyamoto–Nagai disk (a = {MIYAMOTO_NAGAI_A_KPC} kpc, b ={" "}
-              {MIYAMOTO_NAGAI_B_KPC} kpc).
-            </div>
-          </div>
-
-          <label className="control-span-2">
-            <span className="slider-label">
-              <span>Opening angle (full cone, in-plane around +/-disk normal)</span>
-              <strong>{openingAngleDeg.toFixed(1)} deg</strong>
-            </span>
-            <input
-              type="range"
-              min={OPENING_MIN}
-              max={OPENING_MAX}
+          </>
+        ) : (
+          <>
+            <StageSlider
+              label="Break rₛ"
+              display={`${doubleRkneeKpc.toFixed(1)} kpc`}
+              value={doubleRkneeKpc}
+              min={RK_MIN}
+              max={RK_MAX}
               step={0.5}
-              value={openingAngleDeg}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setOpeningAngleDeg(v);
-                sim.setOpeningAngleDeg(v);
-              }}
+              disabled={dragOff}
+              tip={TIP.rKnee}
+              onChange={setDoubleRkneeKpc}
             />
-          </label>
-
-          <label>
-            <span className="slider-label">
-              <span>Tracer mass (drag, log scale)</span>
-              <strong>{formatMsun(particleMassMsun)}</strong>
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.004}
-              value={Number.isFinite(mPartSlider) ? mPartSlider : 0.5}
-              onChange={(e) => {
-                const t = Number(e.target.value);
-                const logM = M_PART_LOG_MIN + t * (M_PART_LOG_MAX - M_PART_LOG_MIN);
-                setParticleMassMsun(10 ** logM);
-              }}
-            />
-          </label>
-
-          <label>
-            <span className="slider-label">
-              <span>Burst pairs</span>
-              <strong>{burstPairs}</strong>
-            </span>
-            <input
-              type="range"
-              min={PAIRS_MIN}
-              max={PAIRS_MAX}
-              value={burstPairs}
-              onChange={(e) => setBurstPairs(Number(e.target.value))}
-            />
-          </label>
-
-          <label className="control-span-2">
-            <span className="slider-label">
-              <span>Disk spread (half-width)</span>
-              <strong>{launchSpreadKpc.toFixed(2)} kpc</strong>
-            </span>
-            <input
-              type="range"
-              min={SPREAD_MIN}
-              max={SPREAD_MAX}
+            <StageSlider
+              label="γ₁ (inner)"
+              display={doubleGamma1.toFixed(2)}
+              value={doubleGamma1}
+              min={G1_MIN}
+              max={G1_MAX}
               step={0.05}
-              value={launchSpreadKpc}
-              onChange={(e) => setLaunchSpreadKpc(Number(e.target.value))}
+              disabled={dragOff}
+              tip={TIP.gamma1}
+              onChange={setDoubleGamma1}
             />
-          </label>
-
-          <label className="control-span-2">
-            <span className="slider-label">Outflow model</span>
-            <select
-              value={mode}
-              onChange={(e) => setMode(e.target.value as OutflowMode)}
-            >
-              <option value="ballistic">Ballistic (no drag)</option>
-              <option value="drag">Drag = λ · Cd · ρ · v² · A/m (ram pressure)</option>
-            </select>
-          </label>
-            </div>
-          </details>
-
-          <details className="control-section control-span-2" open>
-            <summary>Drag</summary>
-            <div className="control-grid" style={{ marginTop: "0.65rem" }}>
-          <label className="control-span-2">
-            <span className="slider-label">
-              <span>Drag strength λ (ram-pressure multiplier)</span>
-              <strong>{dragStrength.toFixed(2)}</strong>
-            </span>
-            <span
-              className="subtle"
-              style={{ fontSize: "0.78rem", display: "block", marginBottom: "0.35rem", lineHeight: 1.4 }}
-            >
-              a_drag = λ · Cd · ρ(r) · v² · (A/m). Tracer is a constant-density spherical cloud
-              (A ∝ m^(2/3)); reference = 10⁵ M☉ @ 100 pc, Cd = 0.5. λ = 0 disables drag without changing the mode.
-            </span>
-            <input
-              type="range"
-              min={DRAG_MIN}
-              max={DRAG_MAX}
+            <StageSlider
+              label="γ₂ (outer)"
+              display={doubleGamma2.toFixed(2)}
+              value={doubleGamma2}
+              min={G2_MIN}
+              max={G2_MAX}
               step={0.05}
-              value={dragStrength}
-              onChange={(e) => setDragStrength(Number(e.target.value))}
-              disabled={mode !== "drag"}
+              disabled={dragOff}
+              tip={TIP.gamma2}
+              onChange={setDoubleGamma2}
             />
-          </label>
+          </>
+        )}
+        <StageReadout
+          label="Gas ρ at inner floor"
+          value={`${gasRhoCenterGcc.toExponential(3)} g cm⁻³`}
+          muted={dragOff}
+          tip={`Gas ρ at inner floor (r = r_soft from the halo/galaxy center): ${gasRhoCenterGcc.toExponential(3)} g cm⁻³ (${gasRhoCenterMsunPerKpc3.toExponential(3)} M☉ kpc⁻³).\nr_soft is spherical radius from that same origin (not an offset from the disk); it caps r in ρ(r) so the power laws stay finite.`}
+        />
+      </StageSection>
+    </>
+  );
 
-          <label className="control-span-2">
-            <span className="slider-label">Gas ρ(r) for drag</span>
-            <select
-              value={gasProfile}
-              onChange={(e) => setGasProfile(e.target.value as GasProfile)}
-              disabled={mode !== "drag"}
-            >
-              <option value="single_power">Single power law</option>
-              <option value="double_power">Double power law</option>
-            </select>
-          </label>
+  const readouts = (
+    <>
+      <StageReadout label="Active tracers" value={activeCount} tip={TIP.activeTracers} />
+      <StageReadout label="Max |v|" value={`${maxSpeedKms.toFixed(0)} km/s`} tip={TIP.maxSpeed} />
+      <StageReadout
+        label="Stream ejected"
+        value={
+          <>
+            {streamEjected} / {STREAM_MAX_PARTICLES}
+            {streamStatus ? <span className="outflow-stream-status"> {streamStatus}</span> : null}
+          </>
+        }
+        valueColor={streamActive ? "#9be4ff" : undefined}
+        tip={TIP.streamEjected}
+      />
+      <StageReadout label="NFW rₛ" value={`${derivedRs.toFixed(1)} kpc`} muted tip={TIP.rs} />
+      <StageReadout label="NFW ρ₀" value={formatHaloRho0(derivedRho0)} muted tip={TIP.rho0} />
+    </>
+  );
 
-          <label className="control-span-2">
-            <span className="slider-label">
-              <span>Gas ρ₀ reference (log₁₀ g cm⁻³ at r = r_soft)</span>
-              <strong>
-                {gasLogRhoGcc.toFixed(2)} → {formatRhoGcc(gasLogRhoGcc)} (
-                {(gasDensityScaleMsunPerKpc3).toExponential(2)} M☉ kpc⁻³)
-              </strong>
-            </span>
-            <input
-              type="range"
-              min={GAS_LOG_GCC_MIN}
-              max={GAS_LOG_GCC_MAX}
-              step={0.05}
-              value={gasLogRhoGcc}
-              onChange={(e) => setGasLogRhoGcc(Number(e.target.value))}
-              disabled={mode !== "drag"}
-            />
-          </label>
-
-          {gasProfile === "single_power" ? (
-            <>
-              <label className="control-span-2">
-                <span className="slider-label">
-                  <span>Radial slope n in ρ ∝ r⁻ⁿ (r ≫ r_soft)</span>
-                  <strong>{singleExponent.toFixed(2)}</strong>
-                </span>
-                <span className="subtle" style={{ fontSize: "0.78rem", display: "block", marginBottom: "0.35rem" }}>
-                  Single-power model uses ρ = ρ₀ (r_soft / r)ⁿ for r ≫ r_soft, i.e. ρ ∝ r⁻ⁿ; larger n means a
-                  steeper outward decline (the value is this n, not a “runaway” growth factor).
-                </span>
-                <input
-                  type="range"
-                  min={SINGLE_EXP_MIN}
-                  max={SINGLE_EXP_MAX}
-                  step={0.05}
-                  value={singleExponent}
-                  onChange={(e) => setSingleExponent(Number(e.target.value))}
-                  disabled={mode !== "drag"}
-                />
-              </label>
-              <label>
-                <span className="slider-label">
-                  <span>Softening rₛ</span>
-                  <strong>{gasSofteningKpc.toFixed(2)} kpc</strong>
-                </span>
-                <input
-                  type="range"
-                  min={GAS_SOFT_MIN}
-                  max={GAS_SOFT_MAX}
-                  step={0.01}
-                  value={gasSofteningKpc}
-                  onChange={(e) => setGasSofteningKpc(Number(e.target.value))}
-                  disabled={mode !== "drag"}
-                />
-              </label>
-            </>
-          ) : (
-            <>
-              <label>
-                <span className="slider-label">
-                  <span>Break rₛ</span>
-                  <strong>{doubleRkneeKpc.toFixed(1)} kpc</strong>
-                </span>
-                <input
-                  type="range"
-                  min={RK_MIN}
-                  max={RK_MAX}
-                  step={0.5}
-                  value={doubleRkneeKpc}
-                  onChange={(e) => setDoubleRkneeKpc(Number(e.target.value))}
-                  disabled={mode !== "drag"}
-                />
-              </label>
-              <label>
-                <span className="slider-label">
-                  <span>γ₁ (inner)</span>
-                  <strong>{doubleGamma1.toFixed(2)}</strong>
-                </span>
-                <input
-                  type="range"
-                  min={G1_MIN}
-                  max={G1_MAX}
-                  step={0.05}
-                  value={doubleGamma1}
-                  onChange={(e) => setDoubleGamma1(Number(e.target.value))}
-                  disabled={mode !== "drag"}
-                />
-              </label>
-              <label className="control-span-2">
-                <span className="slider-label">
-                  <span>γ₂ (outer)</span>
-                  <strong>{doubleGamma2.toFixed(2)}</strong>
-                </span>
-                <input
-                  type="range"
-                  min={G2_MIN}
-                  max={G2_MAX}
-                  step={0.05}
-                  value={doubleGamma2}
-                  onChange={(e) => setDoubleGamma2(Number(e.target.value))}
-                  disabled={mode !== "drag"}
-                />
-              </label>
-            </>
-          )}
-
-          <div className="control-span-2 subtle" style={{ fontSize: "0.82rem", lineHeight: 1.45 }}>
-            Gas ρ at inner floor (r = r_soft from the halo/galaxy center):{" "}
-            <strong>{gasRhoCenterGcc.toExponential(3)} g cm⁻³</strong> (
-            {gasRhoCenterMsunPerKpc3.toExponential(3)} M☉ kpc⁻³).
-            <br />
-            <span style={{ opacity: 0.92 }}>
-              r_soft is spherical radius from that same origin (not an offset from the disk); it caps r in
-              ρ(r) so the power laws stay finite. Conversion: 1 M☉ = 1.98847×10^33 g, 1 kpc = 3.085677581×10^21
-              cm.
-            </span>
-          </div>
-            </div>
-          </details>
-
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={showTrails}
-              onChange={(e) => setShowTrails(e.target.checked)}
-            />
-            Trails
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={showVectors}
-              onChange={(e) => setShowVectors(e.target.checked)}
-            />
-            Velocity vectors
-          </label>
-        </div>
-      </ControlCard>
-
-      <div className="galaxy-outflow-visual-column">
-        <div className="canvas-shell card">
-          <canvas ref={canvasRef} width={900} height={620} />
-        </div>
-        <div className="canvas-shell card galaxy-outflow-density-plot">
-          <div className="subtle" style={{ marginBottom: "0.45rem" }}>
-            Gas density model: log10(ρ [g cm⁻³]) vs log10(r [kpc]). Dots are tracers at their radius and model
-            ρ(r).
-          </div>
-          <canvas ref={plotCanvasRef} width={PLOT_W} height={PLOT_H} />
-        </div>
-        <div className="canvas-shell card galaxy-outflow-density-plot">
-          <div className="subtle" style={{ marginBottom: "0.45rem" }}>
-            PDF of first apocenter radius (v_r: + to -). Top bar: escaped through r_max with no turnaround.
-            When you stop the stream or hit the eject cap, a PNG of this plot is saved below for comparison
-            (e.g. ballistic vs drag). Starting a new stream clears the live histogram so each run is independent.
-          </div>
-          <canvas ref={turnaroundPlotCanvasRef} width={PLOT_W} height={PLOT_TURN_H} />
-          {storedPdfSnapshots.length > 0 ? (
-            <div style={{ marginTop: "0.65rem" }}>
-              <div className="subtle" style={{ marginBottom: "0.35rem" }}>
-                Stored stream PDF snapshots (newest last). Max {MAX_STORED_PDF_SNAPSHOTS}.
-              </div>
-              <div className="galaxy-outflow-pdf-snapshots">
-                {storedPdfSnapshots.map((s) => (
-                  <div key={s.id} className="pdf-snapshot-card">
-                    <img src={s.dataUrl} alt={s.label} />
-                    <div className="subtle" style={{ fontSize: "0.78rem", marginTop: "0.25rem" }}>
-                      {s.label}
-                    </div>
-                    <div className="pdf-snapshot-actions">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          downloadDataUrl(
-                            s.dataUrl,
-                            `galaxy-outflow-pdf-${sanitizeFilenamePart(s.id)}.png`
-                          )
-                        }
-                      >
-                        PNG
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          downloadJson(
-                            s.pdfData,
-                            `galaxy-outflow-pdf-${sanitizeFilenamePart(s.id)}.json`
-                          )
-                        }
-                      >
-                        JSON
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setStoredPdfSnapshots((prev) => prev.filter((x) => x.id !== s.id))
-                        }
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button
-                type="button"
-                style={{ marginTop: "0.5rem", fontSize: "0.82rem" }}
-                onClick={() => setStoredPdfSnapshots([])}
-              >
-                Clear all snapshots
-              </button>
-            </div>
-          ) : null}
-        </div>
+  const inset = (
+    <div className="outflow-plots">
+      <div title={TIP.gasPlot} data-hover-help={TIP.gasPlot}>
+        <canvas
+          ref={plotCanvasRef}
+          role="img"
+          aria-label="Gas density model with tracers at their radius"
+          style={{ aspectRatio: `${PLOT_W} / ${PLOT_H}` }}
+        />
+      </div>
+      <div title={TIP.pdfPlot} data-hover-help={TIP.pdfPlot}>
+        <canvas
+          ref={turnaroundPlotCanvasRef}
+          role="img"
+          aria-label="Distribution of the radius of first apocenter, and the escaped fraction"
+          style={{ aspectRatio: `${PLOT_W} / ${PLOT_H}` }}
+        />
       </div>
     </div>
+  );
+
+  const info = (
+    <>
+      <h4>Reading the picture</h4>
+      <ul>
+        <li>Cyan tracers were launched up (+y), orange ones down (−y); dots grow with tracer mass.</li>
+        <li>
+          Dashed orange rings: 0.2, 0.5 and 1 r_vir. Faint rings: steps of rₛ/2. Red ring: 0.02 r_vir, inside which
+          infalling tracers are removed.
+        </li>
+        <li>Top right: derived NFW rₛ = r_vir / c and ρ₀ (set so the dark mass inside r_vir is M_DM).</li>
+      </ul>
+      <h4>Plots</h4>
+      <ul>
+        <li>Upper: gas density model, log10(ρ [g cm⁻³]) vs log10(r [kpc]). Dots are tracers at their radius and model ρ(r).</li>
+        <li>
+          Lower: PDF of first apocenter radius (v_r: + to −). Top bar: escaped through r_max = max(2.5 × field
+          half-width, 120 kpc) with no turnaround.
+        </li>
+        <li>
+          When you stop the stream or hit the eject cap ({STREAM_MAX_PARTICLES}), a PNG of this plot is saved below for
+          comparison (e.g. ballistic vs drag); the newest {MAX_STORED_PDF_SNAPSHOTS} are kept. Starting a new stream
+          clears the live histogram so each run is independent.
+        </li>
+      </ul>
+      <h4>Model</h4>
+      <ul>
+        <li>
+          Same launch |v| for every tracer; direction is random within the opening-angle cone around ±y (disk normal).
+          Motion is followed in the plane of the picture.
+        </li>
+        <li>
+          Gravity: NFW halo + Miyamoto–Nagai disk (fixed a = {MIYAMOTO_NAGAI_A_KPC} kpc, b = {MIYAMOTO_NAGAI_B_KPC} kpc,
+          vertical scale height). Tracers feel it but have no gravity of their own. The halo pull is Plummer-softened (ε = {GRAV_PLUMMER_EPS_KPC} kpc).
+        </li>
+        <li>
+          Escape velocity: v_esc on the disk midplane (y = 0) at in-plane radius r = max(0.2 kpc, disk spread), for the
+          current halo and disk.
+        </li>
+        <li>
+          Drag mode adds gas deceleration, a_drag = λ · Cd · ρ(r) · v² · (A/m), on constant-density spherical clouds
+          (A ∝ m^(2/3); reference 10⁵ M☉ @ 100 pc, Cd = 0.5). The gas is a fixed ρ(r) at rest; λ = 0 disables drag.
+        </li>
+        <li>
+          Gas ρ(r) uses max(r, r_soft), a spherical radius from the centre (not an offset from the disk), so the power
+          laws stay finite.
+        </li>
+        <li>Units: kpc, M☉, km/s, Myr; 1 M☉ = 1.98847×10^33 g, 1 kpc = 3.085677581×10^21 cm.</li>
+      </ul>
+    </>
+  );
+
+  const below =
+    storedPdfSnapshots.length > 0 ? (
+      <div className="outflow-snapshots">
+        <div className="outflow-snapshot-grid">
+          {storedPdfSnapshots.map((s) => (
+            <figure key={s.id} className="outflow-snapshot-card" title={TIP.snapshot}>
+              <img src={s.dataUrl} alt={s.label} />
+              <figcaption>{s.label}</figcaption>
+              <div className="outflow-snapshot-actions">
+                <button
+                  type="button"
+                  onClick={() => downloadDataUrl(s.dataUrl, `galaxy-outflow-pdf-${sanitizeFilenamePart(s.id)}.png`)}
+                >
+                  PNG
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadJson(s.pdfData, `galaxy-outflow-pdf-${sanitizeFilenamePart(s.id)}.json`)}
+                >
+                  JSON
+                </button>
+                <button type="button" onClick={() => setStoredPdfSnapshots((prev) => prev.filter((x) => x.id !== s.id))}>
+                  Remove
+                </button>
+              </div>
+            </figure>
+          ))}
+        </div>
+        <button type="button" className="outflow-snapshots-clear" onClick={() => setStoredPdfSnapshots([])}>
+          Clear all snapshots
+        </button>
+      </div>
+    ) : null;
+
+  return (
+    <AppletStage
+      logicalWidth={CANVAS_W}
+      logicalHeight={CANVAS_H}
+      canvasRef={canvasRef}
+      canvasLabel="Outflow tracers launched from a disk galaxy inside its dark-matter halo"
+      toolbar={toolbar}
+      controls={controls}
+      readouts={readouts}
+      inset={inset}
+      info={info}
+      play={{ visible: !running || paused, label: playLabel, onClick: onPlayPause }}
+      below={below}
+      rootClassName="outflow-stage"
+    />
   );
 }

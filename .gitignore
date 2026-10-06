@@ -1,5 +1,7 @@
 node_modules
 dist
+vite.config.js
+vite.config.d.ts
 .DS_Store
 *.log
 coverage

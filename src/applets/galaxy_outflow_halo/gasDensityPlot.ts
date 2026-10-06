@@ -20,10 +20,15 @@ export type GasDensityPlotParticle = {
   upward: boolean;
 };
 
-const PAD_L = 52;
-const PAD_R = 14;
-const PAD_T = 14;
-const PAD_B = 38;
+/**
+ * Laid out for a compact inset (~300 × 160 logical px). `width` and `height` are logical
+ * units; the caller sets the context transform to the backing-store scale.
+ */
+const PAD_L = 42;
+const PAD_R = 10;
+const PAD_T = 10;
+const PAD_B = 30;
+const DOT_R = 3;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -41,6 +46,8 @@ export function renderGasDensityPlot(
   particles: GasDensityPlotParticle[]
 ): void {
   ctx.clearRect(0, 0, width, height);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
 
   const bg = ctx.createLinearGradient(0, 0, 0, height);
   bg.addColorStop(0, "#060910");
@@ -116,9 +123,10 @@ export function renderGasDensityPlot(
 
   ctx.strokeStyle = "rgba(100, 130, 180, 0.35)";
   ctx.lineWidth = 1;
-  ctx.font = "11px Inter, system-ui, sans-serif";
+  ctx.font = "10px Inter, system-ui, sans-serif";
   ctx.fillStyle = "rgba(200, 205, 220, 0.75)";
 
+  ctx.textAlign = "center";
   const r0 = Math.ceil(logR0);
   const r1 = Math.floor(logR1);
   for (let tr = r0; tr <= r1; tr += 1) {
@@ -128,9 +136,10 @@ export function renderGasDensityPlot(
     ctx.lineTo(x, PAD_T + plotH);
     ctx.stroke();
     const label = tr === 0 ? "1" : `10^${tr}`;
-    ctx.fillText(label, clamp(x - 14, PAD_L, width - PAD_R - 36), height - 12);
+    ctx.fillText(label, clamp(x, PAD_L + 12, width - PAD_R - 14), PAD_T + plotH + 12);
   }
 
+  ctx.textAlign = "right";
   const g0 = Math.ceil(lrho0);
   const g1 = Math.floor(lrho1);
   for (let tg = g0; tg <= g1; tg += 1) {
@@ -139,8 +148,9 @@ export function renderGasDensityPlot(
     ctx.moveTo(PAD_L, y);
     ctx.lineTo(PAD_L + plotW, y);
     ctx.stroke();
-    ctx.fillText(`${tg}`, 8, y + 4);
+    ctx.fillText(`${tg}`, PAD_L - 5, y + 3.5);
   }
+  ctx.textAlign = "left";
 
   ctx.strokeStyle = "rgba(160, 200, 255, 0.9)";
   ctx.lineWidth = 2;
@@ -174,21 +184,24 @@ export function renderGasDensityPlot(
     const py = yData(ly);
     ctx.beginPath();
     ctx.fillStyle = p.upward ? "rgba(120, 220, 255, 0.95)" : "rgba(255, 190, 140, 0.95)";
-    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.arc(px, py, DOT_R, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
     ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
     ctx.lineWidth = 1;
-    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.arc(px, py, DOT_R, 0, Math.PI * 2);
     ctx.stroke();
   }
 
   ctx.fillStyle = "rgba(210, 215, 230, 0.9)";
-  ctx.font = "12px Inter, system-ui, sans-serif";
-  ctx.fillText("log10(r / kpc)", width / 2 - 48, height - 4);
+  ctx.font = "11px Inter, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("log10(r / kpc)", PAD_L + plotW / 2, height - 5);
   ctx.save();
-  ctx.translate(14, height / 2 + 24);
+  ctx.font = "10px Inter, system-ui, sans-serif";
+  ctx.translate(11, PAD_T + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.fillText("log10(rho / [g cm^-3])", 0, 0);
   ctx.restore();
+  ctx.textAlign = "left";
 }

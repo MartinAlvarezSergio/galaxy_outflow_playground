@@ -37,6 +37,30 @@ export function nfwPotentialPhiKms2(rKpc: number, rho0: number, rsKpc: number): 
 }
 
 /**
+ * Plummer-softened monopole acceleration from an NFW profile at (x,y) in the plane.
+ * Uses M_enc evaluated at r_eff = √(r² + ε²), directed inward: a = −G M_enc r⃗ / (r² + ε²)^{3/2}.
+ * Units: (km/s)² / kpc.
+ */
+export function nfwAnalyticAccelKms2PerKpc(
+  xKpc: number,
+  yKpc: number,
+  rho0: number,
+  rsKpc: number,
+  epsKpc: number
+): { x: number; y: number } {
+  const eps = Math.max(epsKpc, 1e-12);
+  const r2 = xKpc * xKpc + yKpc * yKpc + eps * eps;
+  const rEff = Math.sqrt(r2);
+  const mEnc = nfwMassEnclosed(rEff, rho0, rsKpc);
+  const invD3 = 1 / (r2 * rEff);
+  const gm = G_KPC_MSUN * mEnc;
+  return {
+    x: (-gm * xKpc) * invD3,
+    y: (-gm * yKpc) * invD3
+  };
+}
+
+/**
  * Miyamoto–Nagai disk: Φ(R,z) = −GM / √(R² + (a + √(z²+b²))²).
  * Edge-on 2D view: x = in-plane offset from center (cylindrical R, signed), y = height above disk (maps to z).
  */

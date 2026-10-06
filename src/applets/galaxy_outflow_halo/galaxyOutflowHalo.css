@@ -1,0 +1,93 @@
+/* Galaxy outflow vs. halo: small additions to the applet stage, scoped by AppletStage rootClassName. */
+
+/* Long slider names: when name and value don't fit on one line, the value drops below, right-aligned. */
+.outflow-stage .stage-field-head {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.outflow-stage .stage-field-head strong {
+  margin-left: auto;
+}
+
+/* Width of the two inset plots: 300 px (their logical width), smaller on short or narrow windows. */
+.outflow-stage {
+  --outflow-plot-w: clamp(200px, min(26vw, 36vh), 300px);
+}
+
+/* The two plots stacked in the bottom-right inset. */
+.outflow-stage .outflow-plots {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.outflow-stage .outflow-plots canvas {
+  width: var(--outflow-plot-w);
+  border-radius: 6px;
+}
+
+/* On the overlay layout, the readouts share the plots' column width (inset padding + border = 14 px). */
+@media (min-width: 761px) {
+  .outflow-stage .stage-readouts {
+    width: calc(var(--outflow-plot-w) + 14px);
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+.outflow-stage .outflow-stream-status {
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+/* Saved stream PDFs, under the stage. */
+.outflow-stage .outflow-snapshots {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.outflow-stage .outflow-snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 0.65rem;
+}
+
+.outflow-stage .outflow-snapshot-card {
+  margin: 0;
+  padding: 0.45rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-card);
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+}
+
+.outflow-stage .outflow-snapshot-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.outflow-stage .outflow-snapshot-card figcaption {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.outflow-stage .outflow-snapshot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.outflow-stage .outflow-snapshot-actions button,
+.outflow-stage .outflow-snapshots-clear {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+}
+
+.outflow-stage .outflow-snapshots-clear {
+  justify-self: start;
+}
